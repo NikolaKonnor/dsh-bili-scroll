@@ -26,7 +26,7 @@ codex mcp remove bili >/dev/null 2>&1 || true
 codex mcp add bili \
   --env "BILI_DUTY_HOME=$DATA" \
   --env "BILI_OWNER_UID=$OWNER_UID" \
-  --env "BILI_MCP_TOOLS=$(tr -d '\n' < "$REPO/agent/tools.allow")" \
+  --env "BILI_MCP_TOOLS=@tools.allow" \
   -- "$PY" "$REPO/agent/server.py"
 
 echo "== 4/4 扫码登录（agent 的小号）"
