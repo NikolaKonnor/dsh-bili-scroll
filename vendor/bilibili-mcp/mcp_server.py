@@ -16,7 +16,7 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ⑤ `bili_reply` 回执带上 `rpid` / `rpid_str` / `root` / `parent`（判重表与评论复核要用）
 #      ⑥ `bili_cover` / `bili_frames`：封面和画面帧**作为图片**返回（上游没有；
 #         图能不能进模型上下文由宿主判断）
-#      ⑦ `BILI_CREDENTIAL_FILE` 可改凭证位置；`bili_subtitle(timestamps=True)` 带时间点；`bili_search` 结果带 pubdate（Codex 跑法要用）
+#      ⑦ `BILI_CREDENTIAL_FILE` 可改凭证位置；`bili_subtitle(timestamps=True)` 带时间点（Codex 跑法要用）
 import asyncio
 import json
 import re
@@ -426,7 +426,6 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
             "review": item.get("review", 0),
             "danmaku": item.get("video_review", 0),
             "duration": item.get("duration", ""),
-            "pubdate": _dt.datetime.fromtimestamp(int(item.get("pubdate") or 0)).strftime("%Y-%m-%d") if item.get("pubdate") else "",
             "description": item.get("description", "")[:200],
         })
 
