@@ -18,9 +18,10 @@ codex exec `
   -c 'mcp_servers.bili.startup_timeout_sec=60' `
   -c 'mcp_servers.bili.tool_timeout_sec=180' `
   -o (Join-Path $Logs "$Stamp-weekly-final.txt") `
-  '使用 bili-weekly 技能，按"模式一：复盘"做本周复盘。' 2>&1 | ForEach-Object {
+  '使用 bili-weekly 技能，按"模式一：复盘"做本周复盘。（读 SKILL.md 等文本文件时请加 -Encoding UTF8，否则会乱码。）' 2>&1 | ForEach-Object {
   # 同时显示在窗口里、并以 UTF-8 追加到日志（Windows PowerShell 自带的 >> 会写成 UTF-16，和旧内容混在一起就乱码）
-  $line = "$_"
+  # 原生命令写到 stderr 的行会变成 ErrorRecord；空行直接打印会显示成 "System.Management.Automation.RemoteException"
+  $line = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
   Write-Host $line
   Add-Content -LiteralPath $Log -Value $line -Encoding UTF8
 }
