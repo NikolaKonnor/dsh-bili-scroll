@@ -25,11 +25,12 @@ description: 每天替主人在 B站 挑一期日报：读主人的画像和反�
 
 - 按画像第三节"每天推什么"和"学习位主菜按星期轮换"，确定今天各个位置要找什么（今天是星期几你自己算）。
 - **候选来源，按这个顺序都用一遍**：
-  1. `bili_search_window(keyword, days=..., page=...)`：在最近 N 天里综合排序搜索。**天数按位置给**：AI 新闻 `days=0`（只要今天），下饭/有所感/放松 `days=14`，学习的方法框架类 `days=-1`（不限）、具体公司行业类 `days=365`。
+  1. `watchlist_new_videos(days=7, group="学习")` 和 `watchlist_new_videos(days=0, group="AI新闻")`：主人关注的知识区 UP 主最近发了什么。主人关注了但不太看，这是学习位和 AI 新闻最该先看的来源；照样体检、读字幕再决定。
+  2. `bili_search_window(keyword, days=..., page=...)`：在最近 N 天里综合排序搜索。**天数按位置给**：AI 新闻 `days=0`（只要今天），下饭/有所感/放松 `days=14`，学习的方法框架类 `days=-1`（不限）、具体公司行业类 `days=365`。
      每个方向用 2–4 个**不同角度**的关键词（比如"财报 拆解""商业模式""行业入门""产业链"），**每个词至少看 2 页**；第 2 页还有不少合格的，就继续翻。**不要用 `order="pubdate"`**，按最新排序最容易捞到批量号。
-  2. `bili_rank(category="knowledge", day=3)` 和 `bili_rank(category="technology", day=3)`：知识区、科技区三日榜，给学习位、AI 新闻、下饭位找候选。
-  3. `bili_weekly_must_watch()`：每周必看（编辑精选），给下饭位、有所感位、放松位找候选。
-  4. `bili_recommend(ps=40)`：推荐流，可选（这是小号的推荐流，不是按主人口味推的）。
+  3. `bili_rank(category="knowledge", day=3)` 和 `bili_rank(category="technology", day=3)`：知识区、科技区三日榜，给学习位、AI 新闻、下饭位找候选。
+  4. `bili_weekly_must_watch()`：每周必看（编辑精选），给下饭位、有所感位、放松位找候选。
+  5. `bili_recommend(ps=40)`：推荐流，可选（这是小号的推荐流，不是按主人口味推的）。
 - 先按标题、UP 主、时长、发布时间粗筛：
   - 画像第六节"不要推"名单里的 UP 主，直接跳过。
   - 画像"一律不推"的内容，标题沾边就跳过。
