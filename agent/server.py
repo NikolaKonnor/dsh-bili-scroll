@@ -886,29 +886,73 @@ async def candidate_pool(slot: str, keywords: list, days: int = 14, pages: int =
         v["slot_hint"] = slot
         _pool_info[v["bvid"]] = v
         groups.setdefault(_band(v["play"]), []).append(v)
-    lines = []
-    shown = 0
+    bands = []
     for band in ("小众（1万以下）", "腰部（1万–20万）", "爆款（20万以上）", "播放未知"):
         vs = groups.get(band) or []
         if not vs:
             continue
         vs.sort(key=lambda v: (v["fav"] / v["play"]) if v["play"] > 0 and v["fav"] >= 0 else -1, reverse=True)
-        lines.append(f"## {band}：{len(vs)} 条")
-        for v in vs[:200]:
+        rows = []
+        for v in vs:
             fr = f"{v['fav'] / v['play']:.1%}" if v["play"] > 0 and v["fav"] >= 0 else "?"
             age = f"{v['age']:.0f}天" if v["age"] is not None and v["age"] >= 1 else "今天"
-            lines.append(f"{v['bvid']} | {v['title'][:60]} | {v['up'][:20]} | {_dur_txt(v['dur'])} | {age} | "
-                         f"播放{_wan(v['play'])} | 藏{fr} | {v['source']}")
-            shown += 1
-        if len(vs) > 200:
-            lines.append(f"（这一档还有 {len(vs) - 200} 条收藏率更低的没列出）")
-    head = (f"# 候选池：{slot}（时间范围 {'今天' if d == 0 else ('不限' if d < 0 else f'近 {d} 天')}，"
+            rows.append(f"{v['bvid']} | {v['title'][:50]} | {v['up'][:16]} | {_dur_txt(v['dur'])} | {age} | "
+                        f"播放{_wan(v['play'])} | 藏{fr} | {v['source'][:40]}")
+        bands.append((band, rows))
+
+    # Codex 默认只保留每次工具输出的约 1 万 token（约 40KB），超出会从中间截掉 —— 所以分页。
+    # 每页都包含每一档的一段（按收藏率从高到低轮下去），只看第 1 页也能看到每档最好的那些。
+    total_bytes = sum(len(r.encode("utf-8")) + 1 for _, rows in bands for r in rows)
+    n_pages = max(1, -(-total_bytes // _PAGE_BYTES))
+    pages_out = []
+    for i in range(n_pages):
+        part = []
+        for band, rows in bands:
+            per = -(-len(rows) // n_pages)
+            chunk = rows[i * per:(i + 1) * per]
+            if chunk:
+                part.append(f"## {band}（共 {len(rows)} 条，这页 {len(chunk)} 条）")
+                part.extend(chunk)
+        pages_out.append("\n".join(part))
+    global _pool_seq
+    _pool_seq += 1
+    pool_id = f"{slot}-{_pool_seq}"
+    _pools[pool_id] = pages_out
+    head = (f"# 候选池 {pool_id}（时间范围 {'今天' if d == 0 else ('不限' if d < 0 else f'近 {d} 天')}，"
             f"播放下限 {floor}，搜了 {searched} 页）\n"
             f"拿到 {raw_total} 条，留下 {len(kept)} 条；排除："
-            + "，".join(f"{k} {n}" for k, n in excluded.items() if n) + "\n"
+            + ("，".join(f"{k} {n}" for k, n in excluded.items() if n) or "无") + "\n"
             + (f"出错：{'；'.join(errors[:6])}\n" if errors else "")
+            + f"**共 {n_pages} 页，这是第 1 页**"
+            + (f"；后面几页用 pool_page(\"{pool_id}\", 2) … 读，每页都要看完" if n_pages > 1 else "") + "\n"
             + "每行：BV | 标题 | UP | 时长 | 发布 | 播放 | 收藏率 | 从哪来（搜:关键词#综合排序名次 / 关注 / 榜 / 每周必看）\n")
-    return head + "\n".join(lines)
+    return head + pages_out[0]
+
+
+_PAGE_BYTES = 24000            # 一页约 6000 token，远低于 Codex 的截断线
+_pools: dict = {}
+_pool_seq = 0
+
+
+@tool()
+def pool_page(pool: str, page: int = 2) -> str:
+    """
+    读候选池的下一页（candidate_pool 的结果超过一页时用）。
+
+    Args:
+        pool: 候选池编号（candidate_pool 返回的第一行里写着，如 "学习-2"）
+        page: 第几页（从 1 开始）
+
+    Returns:
+        这一页的候选行
+    """
+    pages_out = _pools.get(str(pool or "").strip())
+    if not pages_out:
+        return _j({"ok": False, "error": f"没有这个候选池：{pool}（现有：{'、'.join(_pools) or '无'}）"})
+    p = int(page or 1)
+    if not 1 <= p <= len(pages_out):
+        return _j({"ok": False, "error": f"{pool} 只有 {len(pages_out)} 页"})
+    return f"# 候选池 {pool} 第 {p}/{len(pages_out)} 页\n" + pages_out[p - 1]
 
 
 @tool()
