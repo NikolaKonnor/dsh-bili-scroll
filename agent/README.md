@@ -38,7 +38,8 @@ macOS / Linux：`bash agent/setup.sh 你的UID`，按最后打印的提示加 cr
 ## 日常使用
 
 - **手动跑一轮**：`powershell -ExecutionPolicy Bypass -File agent\run-daily.ps1`（macOS/Linux：`bash agent/run.sh daily`）
-- **看日报**：`~/.bili-agent/out/<日期>.md`；运行日志在 `~/.bili-agent/logs/`。
+- **看日报**：`~/.bili-agent/out/<日期>.md`；运行日志在 `~/.bili-agent/logs/`（UTF-8）。手动跑时进度直接显示在窗口里；
+  想在另一个窗口看定时任务的进度：`Get-Content -Encoding UTF8 -Wait "$env:USERPROFILE\.bili-agent\logs\$(Get-Date -Format yyyy-MM-dd)-daily.log"`
 - **给反馈**：直接回小号的私信，比如
   `2 好 讲得清楚` · `4 不想看 太浅` · `1 已看过`。理由最有用，照原话记进 `feedback.jsonl`。
 - **应用复盘建议**：在仓库目录运行 `codex --add-dir ~/.bili-agent`，说"应用画像建议"。
