@@ -16,6 +16,7 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ⑤ `bili_reply` 回执带上 `rpid` / `rpid_str` / `root` / `parent`（判重表与评论复核要用）
 #      ⑥ `bili_cover` / `bili_frames`：封面和画面帧**作为图片**返回（上游没有；
 #         图能不能进模型上下文由宿主判断）
+#      ⑦ `BILI_CREDENTIAL_FILE` 可改凭证位置；`bili_subtitle(timestamps=True)` 带时间点（Codex 跑法要用）
 import asyncio
 import json
 import re
@@ -39,7 +40,8 @@ from bilibili_api.login_v2 import QrCodeLogin, QrCodeLoginEvents
 
 # ========== 初始化 ==========
 
-CRED_FILE = Path(__file__).parent / "bili_credential.json"
+# ⭐ 凭证位置可以用 BILI_CREDENTIAL_FILE 指到别处（Codex / Claude 跑法用；不设 = 原来的位置，DSH 插件行为不变）
+CRED_FILE = Path(os.environ.get("BILI_CREDENTIAL_FILE") or (Path(__file__).parent / "bili_credential.json"))
 
 mcp = FastMCP("bilibili-mcp")
 
@@ -505,12 +507,13 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
 # ========== Tool 3: 获取字幕 ==========
 
 @tool()
-async def bili_subtitle(bvid: str) -> str:
+async def bili_subtitle(bvid: str, timestamps: bool = False) -> str:
     """
     获取B站视频的AI字幕（语音转文字）
 
     Args:
         bvid: 视频BV号，如"BV1uNk1YxEJQ"
+        timestamps: 为 true 时每行前面带 [mm:ss] 时间点（写内容大纲时用）
     
     Returns:
         视频的完整字幕文本
@@ -551,8 +554,15 @@ async def bili_subtitle(bvid: str) -> str:
         async with session.get(sub_url) as resp:
             sub_data = await resp.json()
 
-    texts = [item.get("content", "") for item in sub_data.get("body", [])]
-    full_text = "\n".join(texts)
+    body = sub_data.get("body", [])
+    texts = [item.get("content", "") for item in body]
+    if timestamps:
+        def _mmss(sec):
+            sec = int(float(sec or 0))
+            return f"{sec // 60:02d}:{sec % 60:02d}"
+        full_text = "\n".join(f"[{_mmss(item.get('from'))}] {item.get('content', '')}" for item in body)
+    else:
+        full_text = "\n".join(texts)
 
     return json.dumps({
         "bvid": bvid,
