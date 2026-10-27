@@ -20,6 +20,7 @@ agent/server.py —— 给 Codex / Claude Code 用的 B站 MCP 入口
   BILI_OWNER_UID        主人的 B站 UID（日报私信发给谁；也只读这个人发来的私信）
   BILI_MCP_TOOLS        工具白名单（逗号分隔）；不设 = 全部注册（只建议手动调试时这样）
 """
+import asyncio
 import json
 import os
 import sys
@@ -278,6 +279,159 @@ async def bili_quality_check(bvid: str) -> str:
     if view >= 1000 and out["rates"]["like_per_view"] < 0.01:
         out["flags"].append("weak_engagement：点赞/播放 低于 1%")
     return _j(out)
+
+
+# =====================================================================
+# ①¾ 更多候选来源：按时间范围 + 翻页搜索、排行榜、每周必看、关注的知识区 UP
+# =====================================================================
+
+def _clean_title(t: str) -> str:
+    return str(t or "").replace('<em class="keyword">', "").replace("</em>", "")
+
+
+@tool()
+async def bili_search_window(keyword: str, days: int = 14, page: int = 1, order: str = "totalrank") -> str:
+    """
+    在"最近 N 天发布的视频"里搜索（综合排序 + 时间范围，可翻页）。比 bili_search 更适合找新鲜又有人看的视频。
+
+    Args:
+        keyword: 关键词
+        days: 只要最近多少天发布的；0 = 只要今天发布的；-1 = 不限时间
+        page: 第几页（每页约 40 条），想看更多就翻到 2、3 页
+        order: totalrank=综合（默认，推荐）/ click=播放多 / pubdate=最新（不推荐，容易捞到批量号）
+
+    Returns:
+        JSON：videos 列表（bvid / title / author / mid / play / pubdate / duration / description）
+    """
+    order_map = {
+        "totalrank": base.search.OrderVideo.TOTALRANK,
+        "click": base.search.OrderVideo.CLICK,
+        "pubdate": base.search.OrderVideo.PUBDATE,
+    }
+    kw = {}
+    d = int(days if days is not None else 14)
+    if d >= 0:
+        today = dt.date.today()
+        # B站 按"日期 00:00"算区间，结束日要写明天，才包含今天发布的
+        kw["time_start"] = (today - dt.timedelta(days=d)).isoformat()
+        kw["time_end"] = (today + dt.timedelta(days=1)).isoformat()
+    res = await base.search.search_by_type(
+        keyword=keyword, search_type=base.search.SearchObjectType.VIDEO,
+        order_type=order_map.get(order, base.search.OrderVideo.TOTALRANK),
+        page=max(1, int(page or 1)), **kw)
+    out = []
+    for it in res.get("result", []) or []:
+        pub = int(it.get("pubdate") or 0)
+        out.append({
+            "bvid": it.get("bvid", ""), "title": _clean_title(it.get("title")),
+            "author": it.get("author", ""), "mid": it.get("mid"),
+            "play": it.get("play", 0), "duration": it.get("duration", ""),
+            "pubdate": dt.datetime.fromtimestamp(pub).strftime("%Y-%m-%d %H:%M") if pub else "",
+            "description": str(it.get("description", "") or "")[:120],
+        })
+    return _j({"keyword": keyword, "days": d, "page": page, "num_pages": res.get("numPages"),
+               "count": len(out), "videos": out})
+
+
+@tool()
+async def bili_weekly_must_watch() -> str:
+    """
+    B站「每周必看」最新一期（官方编辑精选，质量门槛高，适合下饭位、有所感位找候选）。
+
+    Returns:
+        JSON：期数、主题、videos 列表（bvid / title / author / play / pubdate / rcmd_reason）
+    """
+    lst = await base.hot.get_weekly_hot_videos_list()
+    items = (lst or {}).get("list") or []
+    if not items:
+        return _j({"ok": False, "error": "没拿到期数列表"})
+    latest = max(items, key=lambda x: int(x.get("number") or 0))
+    data = await base.hot.get_weekly_hot_videos(week=int(latest.get("number")))
+    vids = []
+    for it in (data or {}).get("list") or []:
+        pub = int(it.get("pubdate") or 0)
+        vids.append({
+            "bvid": it.get("bvid", ""), "title": it.get("title", ""),
+            "author": (it.get("owner") or {}).get("name", ""),
+            "play": (it.get("stat") or {}).get("view", 0),
+            "pubdate": dt.datetime.fromtimestamp(pub).strftime("%Y-%m-%d") if pub else "",
+            "duration": it.get("duration"), "rcmd_reason": it.get("rcmd_reason", ""),
+        })
+    return _j({"number": latest.get("number"), "subject": latest.get("subject", ""),
+               "count": len(vids), "videos": vids})
+
+
+WATCHLIST = HOME / "watch_ups.json"
+
+
+@tool()
+async def watchlist_new_videos(days: int = 3, group: str = "") -> str:
+    """
+    主人关注的知识区 UP 主最近发了什么（名单在数据目录的 watch_ups.json，由主人维护）。
+    主人关注了但基本不会主动去看，所以这是很好的候选来源；照样要体检、读字幕再决定。
+
+    Args:
+        days: 只看最近多少天的投稿（默认 3）
+        group: 只看某一组（AI新闻 / 学习 / 下饭），留空 = 全部
+
+    Returns:
+        JSON：videos 列表（group / up / bvid / title / play / created / length）
+    """
+    if not WATCHLIST.exists():
+        return _j({"ok": False, "error": f"名单不存在：{WATCHLIST}"})
+    try:
+        ups = json.loads(WATCHLIST.read_text(encoding="utf-8"))
+    except ValueError as e:
+        return _j({"ok": False, "error": f"名单格式不对：{e}"})
+    if group:
+        ups = [u for u in ups if u.get("group") == group]
+    cred = base.get_cred()
+    d = int(days if days is not None else 3)
+    cutoff = (dt.datetime.combine(dt.date.today(), dt.time()) if d <= 0
+              else dt.datetime.now() - dt.timedelta(days=d)).timestamp()
+    vids, errors = [], []
+    for u in ups[:60]:
+        try:
+            res = await base.user.User(uid=int(u["mid"]), credential=cred).get_videos(
+                pn=1, ps=10, order=base.user.VideoOrder.PUBDATE)
+            for x in (res.get("list") or {}).get("vlist") or []:
+                if int(x.get("created") or 0) >= cutoff:
+                    vids.append({
+                        "group": u.get("group", ""), "up": u.get("name", ""), "bvid": x.get("bvid", ""),
+                        "title": x.get("title", ""), "play": x.get("play"), "length": x.get("length", ""),
+                        "created": dt.datetime.fromtimestamp(int(x["created"])).strftime("%Y-%m-%d %H:%M"),
+                    })
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{u.get('name')}: {type(e).__name__}")
+        await asyncio.sleep(0.4)   # 慢一点，别触发风控
+    return _j({"days": days, "ups_checked": len(ups[:60]), "count": len(vids), "videos": vids, "errors": errors[:10]})
+
+
+@tool()
+def duty_report_write(text: str) -> str:
+    """
+    把**今天的日报整体写成一份**（覆盖）。覆盖前，旧版本会自动存到 out/history/ 里，不会丢。
+    一轮只在最后调用一次，写完整的最终清单。
+
+    Args:
+        text: 完整日报（markdown）
+
+    Returns:
+        写到了哪个文件、旧版本存在哪
+    """
+    body = str(text or "").replace("\r\n", "\n").strip()
+    if not body:
+        return _j({"ok": False, "error": "内容是空的"})
+    p = HOME / "out" / (_today() + ".md")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    backup = ""
+    if p.exists():
+        h = HOME / "out" / "history" / f"{_today()}_{dt.datetime.now():%H%M%S}.md"
+        h.parent.mkdir(parents=True, exist_ok=True)
+        h.write_text(p.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+        backup = str(h)
+    p.write_text(body + "\n", encoding="utf-8")
+    return _j({"ok": True, "path": str(p), "previous_saved_to": backup})
 
 
 # =====================================================================

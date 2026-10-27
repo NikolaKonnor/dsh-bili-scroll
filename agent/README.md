@@ -53,6 +53,7 @@ macOS / Linux：`bash agent/setup.sh 你的UID`，按最后打印的提示加 cr
 | `seen.md` | 判重表 | 只追加 |
 | `out/<日期>.md`、`out/<日期>.index.json` | 日报全文、私信编号索引 | 每轮写 |
 | `proposals/<日期>.md` | 每周的画像修改建议 | 每周写 |
+| `watch_ups.json` | 你关注的知识区 UP 主名单（`[{"name","mid","group"}]`，group = AI新闻 / 学习 / 下饭），日报会先看他们的新投稿 | 你 |
 | `bili_credential.json` | 小号登录凭证（敏感） | 扫码时写 |
 
 ## 安全设计
