@@ -10,6 +10,8 @@ agent/server.py —— 给 Codex / Claude Code 用的 B站 MCP 入口
        report_index_write / report_index_read / duty_report_read
   ③ 只对主人的私信（收件人写死在环境变量里，模型改不了）
        owner_send / owner_messages / owner_messages_ack
+  ④ 两阶段：初筛（便宜模型，看几百条标题挑短名单）→ 精选（读短名单，体检、读字幕）
+       candidate_pool / shortlist_write / shortlist_read
 
 所有工具同样受 BILI_MCP_TOOLS 白名单约束：名单外的工具不会出现在 list_tools 里。
 
@@ -21,8 +23,10 @@ agent/server.py —— 给 Codex / Claude Code 用的 B站 MCP 入口
   BILI_MCP_TOOLS        工具白名单（逗号分隔）；不设 = 全部注册（只建议手动调试时这样）
 """
 import asyncio
+import html
 import json
 import os
+import re
 import sys
 import datetime as dt
 from pathlib import Path
@@ -31,10 +35,12 @@ from pathlib import Path
 _HOME = Path(os.environ.get("BILI_DUTY_HOME") or (Path.home() / ".bili-agent")).expanduser()
 os.environ["BILI_DUTY_HOME"] = str(_HOME)
 os.environ.setdefault("BILI_CREDENTIAL_FILE", str(_HOME / "bili_credential.json"))
-# 白名单写成 "@tools.allow" 时，从本目录的 tools.allow 读 —— 以后改白名单不用重新 codex mcp add
-if os.environ.get("BILI_MCP_TOOLS", "").strip() == "@tools.allow":
-    _allow_file = Path(__file__).resolve().parent / "tools.allow"
-    os.environ["BILI_MCP_TOOLS"] = _allow_file.read_text(encoding="utf-8").strip() or "__none__"
+# 白名单写成 "@tools.allow" / "@tools.prefilter.allow" 时，从本目录的同名文件读 —— 以后改白名单不用重新 codex mcp add
+_allow_ref = os.environ.get("BILI_MCP_TOOLS", "").strip()
+if _allow_ref.startswith("@"):
+    _allow_file = Path(__file__).resolve().parent / Path(_allow_ref[1:]).name   # 只认本目录里的文件
+    _allow_text = _allow_file.read_text(encoding="utf-8").strip() if _allow_file.is_file() else ""
+    os.environ["BILI_MCP_TOOLS"] = _allow_text or "__none__"
 
 _VENDOR = Path(__file__).resolve().parent.parent / "vendor" / "bilibili-mcp"
 sys.path.insert(0, str(_VENDOR))
@@ -642,6 +648,346 @@ def owner_messages_ack(up_to_ts: int) -> str:
     CURSOR.parent.mkdir(parents=True, exist_ok=True)
     CURSOR.write_text(_j({"ts": ts, "at": dt.datetime.now().isoformat(timespec="seconds")}), encoding="utf-8")
     return _j({"ok": True, "ts": ts})
+
+
+# =====================================================================
+# ④ 两阶段：初筛的候选池 + 短名单
+#    代码只做"不用判断"的排除（看过的、不推的 UP、太旧、播放不到下限、重复），
+#    剩下的全部交给初筛模型按画像挑 —— 不按热度打分，免得最后只剩爆款。
+# =====================================================================
+
+EXCLUDE_UPS = HOME / "exclude_ups.json"
+SHORTLIST_DIR = HOME / "shortlist"
+_BV_RE = re.compile(r"BV[0-9A-Za-z]{10}")
+_pool_info: dict = {}          # 本进程里出现过的候选：bvid -> 元数据（写短名单时补全标题等）
+_shortlist_started = False     # 本进程第一次写短名单 = 重写今天那份；之后是合并
+
+
+def _seen_bvids() -> set:
+    f = HOME / "seen.md"
+    if not f.exists():
+        return set()
+    return set(_BV_RE.findall(f.read_text(encoding="utf-8", errors="replace")))
+
+
+def _excluded_ups() -> set:
+    """不推的 UP 主（数据目录的 exclude_ups.json，主人维护）：["名字", ...] 或 [{"name": ...}, ...]"""
+    if not EXCLUDE_UPS.exists():
+        return set()
+    try:
+        raw = json.loads(EXCLUDE_UPS.read_text(encoding="utf-8"))
+    except ValueError:
+        return set()
+    names = set()
+    for x in raw if isinstance(raw, list) else []:
+        n = x.get("name") if isinstance(x, dict) else x
+        if str(n or "").strip():
+            names.add(str(n).strip().lower())
+    return names
+
+
+def _dur_sec(v) -> int:
+    if isinstance(v, (int, float)):
+        return int(v)
+    try:
+        parts = [int(p) for p in str(v or "").strip().split(":")]
+    except ValueError:
+        return 0
+    sec = 0
+    for p in parts:
+        sec = sec * 60 + p
+    return sec
+
+
+def _dur_txt(sec: int) -> str:
+    if sec <= 0:
+        return "?"
+    h, m, s = sec // 3600, sec % 3600 // 60, sec % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _num(n) -> int:
+    try:
+        return int(n)
+    except (TypeError, ValueError):
+        return -1      # B站 有时给 "--"
+
+
+def _wan(n: int) -> str:
+    if n < 0:
+        return "?"
+    return f"{n / 10000:.1f}万" if n >= 10000 else str(n)
+
+
+def _band(play: int) -> str:
+    if play < 0:
+        return "播放未知"
+    if play < 10000:
+        return "小众（1万以下）"
+    if play <= 200000:
+        return "腰部（1万–20万）"
+    return "爆款（20万以上）"
+
+
+@tool()
+async def candidate_pool(slot: str, keywords: list, days: int = 14, pages: int = 3,
+                         watch_group: str = "", watch_days: int = -2, rank: list = None,
+                         weekly: bool = False, min_play: int = -1) -> str:
+    """
+    【初筛用】一次性把一个位置的候选拉全：多个关键词 × 多页搜索，外加（可选）关注的 UP 主新投稿、
+    分区排行榜、每周必看。代码只排除不需要判断的：判重表里有的、不推名单里的 UP、超出时间范围的、
+    发布满 3 天但播放不到下限的、重复的。剩下的**全部**按播放分成 小众 / 腰部 / 爆款 三档列出来，由你来挑。
+
+    Args:
+        slot: 这批候选给哪个位置找（学习 / AI新闻 / 下饭 / 有所感 / 放松）；决定默认播放下限
+        keywords: 关键词列表（最多 8 个；不同角度，别只是同义词）
+        days: 只要最近多少天发布的；0 = 只要今天；-1 = 不限
+        pages: 每个关键词翻几页（1–5，每页约 40 条）
+        watch_group: 同时拉关注名单里这一组 UP 主的新投稿（AI新闻 / 学习 / 下饭），留空 = 不拉
+        watch_days: 关注名单看最近几天；不填 = 跟 days 一样（days=-1 时取每人最近 10 条）
+        rank: 同时拉哪些分区的三日榜，如 ["knowledge", "technology"]；不填 = 不拉
+        weekly: 是否同时拉最新一期「每周必看」
+        min_play: 播放下限（只管发布满 3 天的）；-1 = 按位置：学习 / AI新闻 2000，其余 5000
+
+    Returns:
+        按三档分组的候选行（BV | 标题 | UP | 时长 | 发布几天 | 播放 | 收藏率 | 从哪来），以及各类被排除的数量
+    """
+    slot = str(slot or "").strip() or "未分"
+    kws = [str(k).strip() for k in (keywords or []) if str(k).strip()][:8]
+    pages = max(1, min(int(pages or 3), 5))
+    d = int(days if days is not None else 14)
+    floor = int(min_play) if min_play is not None and int(min_play) >= 0 else (
+        2000 if ("学习" in slot or "AI" in slot.upper()) else 5000)
+    now = dt.datetime.now()
+    start_today = dt.datetime.combine(dt.date.today(), dt.time())
+    cutoff = None if d < 0 else (start_today if d == 0 else now - dt.timedelta(days=d))
+
+    seen, banned = _seen_bvids(), _excluded_ups()
+    excluded = {"判重表里有": 0, "不推的 UP": 0, "超出时间范围": 0, "播放不到下限": 0, "重复": 0}
+    kept: dict = {}
+    raw_total = 0
+    errors = []
+
+    def consider(bvid, title, up, play, fav, dur, pub_ts, source):
+        nonlocal raw_total
+        raw_total += 1
+        bvid = str(bvid or "").strip()
+        if not bvid.startswith("BV"):
+            return
+        if bvid in kept:
+            excluded["重复"] += 1
+            kept[bvid]["source"] = (kept[bvid]["source"] + "、" + source)[:60]
+            return
+        if bvid in seen:
+            excluded["判重表里有"] += 1
+            return
+        if str(up or "").strip().lower() in banned:
+            excluded["不推的 UP"] += 1
+            return
+        pub = dt.datetime.fromtimestamp(pub_ts) if pub_ts else None
+        if cutoff and pub and pub < cutoff:
+            excluded["超出时间范围"] += 1
+            return
+        age = (now - pub).total_seconds() / 86400 if pub else None
+        if age is not None and age >= 3 and 0 <= play < floor:
+            excluded["播放不到下限"] += 1
+            return
+        kept[bvid] = {
+            "bvid": bvid, "title": html.unescape(_clean_title(title)).strip(), "up": str(up or ""),
+            "play": play, "fav": fav, "dur": _dur_sec(dur),
+            "pubdate": pub.strftime("%Y-%m-%d") if pub else "", "age": age, "source": source,
+        }
+
+    # ① 关键词搜索（综合排序 + 时间范围 + 翻页）
+    kw_time = {}
+    if d >= 0:
+        kw_time = {"time_start": (dt.date.today() - dt.timedelta(days=d)).isoformat(),
+                   "time_end": (dt.date.today() + dt.timedelta(days=1)).isoformat()}
+    searched = 0
+    for k in kws:
+        pos = 0
+        for p in range(1, pages + 1):
+            try:
+                res = await base.search.search_by_type(
+                    keyword=k, search_type=base.search.SearchObjectType.VIDEO,
+                    order_type=base.search.OrderVideo.TOTALRANK, page=p, **kw_time)
+                searched += 1
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"搜「{k}」第 {p} 页：{type(e).__name__} {str(e)[:60]}")
+                await asyncio.sleep(2)
+                break
+            items = res.get("result", []) or []
+            for it in items:
+                pos += 1
+                consider(it.get("bvid"), it.get("title"), it.get("author"), _num(it.get("play")),
+                         _num(it.get("favorites")), it.get("duration"), int(it.get("pubdate") or 0),
+                         f"搜:{k}#{pos}")
+            await asyncio.sleep(0.6)   # 慢一点，别触发风控
+            if p >= int(res.get("numPages") or 1) or not items:
+                break
+
+    # ② 关注名单里的知识区 UP 主
+    if watch_group:
+        wd = d if watch_days is None or int(watch_days) == -2 else int(watch_days)
+        wcut = None if wd < 0 else (start_today if wd == 0 else now - dt.timedelta(days=wd))
+        ups = []
+        if WATCHLIST.exists():
+            try:
+                ups = [u for u in json.loads(WATCHLIST.read_text(encoding="utf-8")) if u.get("group") == watch_group]
+            except ValueError as e:
+                errors.append(f"关注名单格式不对：{e}")
+        cred = base.get_cred()
+        for u in ups[:60]:
+            try:
+                res = await base.user.User(uid=int(u["mid"]), credential=cred).get_videos(
+                    pn=1, ps=10, order=base.user.VideoOrder.PUBDATE)
+                for x in (res.get("list") or {}).get("vlist") or []:
+                    ts = int(x.get("created") or 0)
+                    if wcut is None or ts >= wcut.timestamp():
+                        consider(x.get("bvid"), x.get("title"), u.get("name") or x.get("author"),
+                                 _num(x.get("play")), -1, x.get("length"), ts, "关注")
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"关注 {u.get('name')}：{type(e).__name__}")
+            await asyncio.sleep(0.4)
+
+    # ③ 分区三日榜
+    for cat in (rank or [])[:4]:
+        try:
+            rt = getattr(base.rank.RankType, {"knowledge": "Knowledge", "technology": "Technology",
+                                              "life": "Life", "food": "Food", "game": "Game",
+                                              "music": "Music", "cinephile": "Cinephile",
+                                              "all": "All"}.get(str(cat).lower(), "All"))
+            res = await base.rank.get_rank(type_=rt, day=base.rank.RankDayType.THREE_DAY)
+            for it in res.get("list", []) or []:
+                st = it.get("stat", {}) or {}
+                consider(it.get("bvid"), it.get("title"), (it.get("owner") or {}).get("name"),
+                         _num(st.get("view")), _num(st.get("favorite")), it.get("duration"),
+                         int(it.get("pubdate") or 0), f"榜:{cat}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"排行榜 {cat}：{type(e).__name__}")
+
+    # ④ 每周必看
+    if weekly:
+        try:
+            lst = await base.hot.get_weekly_hot_videos_list()
+            latest = max((lst or {}).get("list") or [], key=lambda x: int(x.get("number") or 0))
+            data = await base.hot.get_weekly_hot_videos(week=int(latest.get("number")))
+            for it in (data or {}).get("list") or []:
+                st = it.get("stat", {}) or {}
+                consider(it.get("bvid"), it.get("title"), (it.get("owner") or {}).get("name"),
+                         _num(st.get("view")), _num(st.get("favorite")), it.get("duration"),
+                         int(it.get("pubdate") or 0), "每周必看")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"每周必看：{type(e).__name__}")
+
+    # 分三档；档内按收藏率从高到低（收藏率不受热度影响，小众好视频也能排前面）
+    groups: dict = {}
+    for v in kept.values():
+        v["slot_hint"] = slot
+        _pool_info[v["bvid"]] = v
+        groups.setdefault(_band(v["play"]), []).append(v)
+    lines = []
+    shown = 0
+    for band in ("小众（1万以下）", "腰部（1万–20万）", "爆款（20万以上）", "播放未知"):
+        vs = groups.get(band) or []
+        if not vs:
+            continue
+        vs.sort(key=lambda v: (v["fav"] / v["play"]) if v["play"] > 0 and v["fav"] >= 0 else -1, reverse=True)
+        lines.append(f"## {band}：{len(vs)} 条")
+        for v in vs[:200]:
+            fr = f"{v['fav'] / v['play']:.1%}" if v["play"] > 0 and v["fav"] >= 0 else "?"
+            age = f"{v['age']:.0f}天" if v["age"] is not None and v["age"] >= 1 else "今天"
+            lines.append(f"{v['bvid']} | {v['title'][:60]} | {v['up'][:20]} | {_dur_txt(v['dur'])} | {age} | "
+                         f"播放{_wan(v['play'])} | 藏{fr} | {v['source']}")
+            shown += 1
+        if len(vs) > 200:
+            lines.append(f"（这一档还有 {len(vs) - 200} 条收藏率更低的没列出）")
+    head = (f"# 候选池：{slot}（时间范围 {'今天' if d == 0 else ('不限' if d < 0 else f'近 {d} 天')}，"
+            f"播放下限 {floor}，搜了 {searched} 页）\n"
+            f"拿到 {raw_total} 条，留下 {len(kept)} 条；排除："
+            + "，".join(f"{k} {n}" for k, n in excluded.items() if n) + "\n"
+            + (f"出错：{'；'.join(errors[:6])}\n" if errors else "")
+            + "每行：BV | 标题 | UP | 时长 | 发布 | 播放 | 收藏率 | 从哪来（搜:关键词#综合排序名次 / 关注 / 榜 / 每周必看）\n")
+    return head + "\n".join(lines)
+
+
+@tool()
+def shortlist_write(items: list) -> str:
+    """
+    【初筛用】把挑出来的候选写进今天的短名单，交给精选阶段细看。
+    这一轮第一次调用会重写今天的短名单，之后的调用是合并（同一个 BV 以后写的为准）。
+
+    Args:
+        items: [{"bvid": "BV…", "slot": "学习", "why": "一句话为什么留它（30 字内）"}, …]
+               slot 用：学习 / AI新闻 / 下饭 / 有所感 / 放松；标题、UP、播放等由候选池自动补上
+
+    Returns:
+        写到了哪个文件、现在各位置各有多少条
+    """
+    global _shortlist_started
+    p = SHORTLIST_DIR / (_today() + ".json")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    cur: dict = {}
+    if _shortlist_started and p.exists():
+        try:
+            cur = {it["bvid"]: it for it in json.loads(p.read_text(encoding="utf-8")).get("items", [])}
+        except (ValueError, KeyError):
+            cur = {}
+    bad = 0
+    for it in items or []:
+        bv = str((it or {}).get("bvid", "")).strip() if isinstance(it, dict) else ""
+        if not _BV_RE.fullmatch(bv):
+            bad += 1
+            continue
+        info = _pool_info.get(bv, {})
+        cur[bv] = {
+            "bvid": bv, "slot": str(it.get("slot") or info.get("slot_hint") or "")[:10],
+            "why": str(it.get("why") or "")[:60],
+            "title": info.get("title", str(it.get("title") or ""))[:80], "up": info.get("up", "")[:30],
+            "play": info.get("play", -1), "fav": info.get("fav", -1), "dur": info.get("dur", 0),
+            "pubdate": info.get("pubdate", ""), "source": info.get("source", "")[:60],
+        }
+    if len(cur) > 150:
+        return _j({"ok": False, "error": f"短名单太长（{len(cur)} 条，上限 150）：再挑一挑"})
+    p.write_text(_j({"date": _today(), "updated": dt.datetime.now().isoformat(timespec="seconds"),
+                     "items": list(cur.values())}), encoding="utf-8")
+    _shortlist_started = True
+    by_slot: dict = {}
+    for v in cur.values():
+        by_slot[v["slot"]] = by_slot.get(v["slot"], 0) + 1
+    return _j({"ok": True, "path": str(p), "total": len(cur), "by_slot": by_slot, "rejected_bad_bvid": bad})
+
+
+@tool()
+def shortlist_read(date: str = "") -> str:
+    """
+    【精选用】读今天初筛挑出来的短名单（按位置分组）。没有短名单就说明，那就按老办法自己搜。
+
+    Args:
+        date: YYYY-MM-DD（留空 = 今天）
+
+    Returns:
+        各位置的候选行：BV | 标题 | UP | 时长 | 发布日期 | 播放 | 收藏率 | 初筛理由
+    """
+    p = SHORTLIST_DIR / (_norm_date(date) + ".json")
+    if not p.exists():
+        return _j({"ok": False, "error": f"今天还没有短名单（{p.name}），请按老办法自己找候选"})
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except ValueError as e:
+        return _j({"ok": False, "error": f"短名单读不了：{e}"})
+    groups: dict = {}
+    for v in data.get("items", []):
+        groups.setdefault(v.get("slot") or "未分", []).append(v)
+    out = [f"# 短名单 {data.get('date')}（{len(data.get('items', []))} 条，初筛于 {data.get('updated', '')}）"]
+    for slot, vs in groups.items():
+        out.append(f"## {slot}：{len(vs)} 条")
+        for v in vs:
+            play, fav = int(v.get("play", -1)), int(v.get("fav", -1))
+            fr = f"{fav / play:.1%}" if play > 0 and fav >= 0 else "?"
+            out.append(f"{v['bvid']} | {v.get('title', '')} | {v.get('up', '')} | {_dur_txt(int(v.get('dur') or 0))} | "
+                       f"{v.get('pubdate', '')} | 播放{_wan(play)} | 藏{fr} | {v.get('why', '')}")
+    return "\n".join(out)
 
 
 if __name__ == "__main__":

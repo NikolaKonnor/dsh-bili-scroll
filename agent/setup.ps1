@@ -64,7 +64,7 @@ if ($Schedule) {
   $ps = (Get-Command powershell).Source
   $daily = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$Repo\agent\run-daily.ps1`""
   $weekly = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$Repo\agent\run-weekly.ps1`""
-  $set = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+  $set = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2)
   Register-ScheduledTask -TaskName 'bili-agent-daily' -Action $daily -Trigger (New-ScheduledTaskTrigger -Daily -At 12:30) -Settings $set -Force | Out-Null
   Register-ScheduledTask -TaskName 'bili-agent-weekly' -Action $weekly -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 20:00) -Settings $set -Force | Out-Null
   Write-Host '已注册：bili-agent-daily（每天 12:30）、bili-agent-weekly（每周日 20:00）。电脑要开着；错过的会在开机后补跑一次。'
