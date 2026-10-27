@@ -444,17 +444,88 @@ def duty_report_write(text: str) -> str:
 # ② 日报索引
 # =====================================================================
 
-@tool()
-def report_index_write(items: list, date: str = "") -> str:
+NOTES_DIR = HOME / "notes"
+
+
+def _safe_name(s: str, limit: int = 40) -> str:
+    t = "".join("_" if ch in '<>:"/\\|?*\r\n\t' else ch for ch in str(s or "")).strip(" .")
+    return t[:limit] or "untitled"
+
+
+def _report_section(date: str, bvid: str) -> str:
+    """从那天的日报里取出这条视频的那一段（标题、大纲、和我的关系……）"""
+    p = HOME / "out" / (date + ".md")
+    if not p.exists():
+        return ""
+    out, on = [], False
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("### "):
+            if on:
+                break
+            on = line[4:].strip() == bvid
+            continue
+        if on:
+            out.append(line)
+            if line.startswith("[打开视频]"):
+                break
+    return "\n".join(out).strip()
+
+
+async def save_learning_notes(items: list, date: str, force: bool = False) -> list:
     """
-    写今天这期日报的编号索引（私信里的 1、2、3 对应哪个 BV）。发私信之前必须先写。
+    把学习位视频的字幕（带时间点）和日报里的介绍存成一个 markdown，方便主人对照记笔记。
+    存到 notes/<年-月>/<日期> <位置> <标题> <BV>.md；已经存过的不重复存。
+    """
+    saved = []
+    for it in items:
+        bv = str(it.get("bvid", "")).strip()
+        slot = str(it.get("slot", ""))
+        if not bv or "学习" not in slot:
+            continue
+        folder = NOTES_DIR / date[:7]
+        if not force and folder.exists() and any(folder.glob(f"*{bv}.md")):
+            continue
+        title = str(it.get("title", ""))
+        try:
+            sub = json.loads(await base.bili_subtitle(bv, timestamps=True))
+        except Exception as e:  # noqa: BLE001
+            sub = {"error": f"{type(e).__name__}: {str(e)[:80]}"}
+        title = sub.get("title") or title
+        text = sub.get("text") or ""
+        body = [
+            f"# {title}", "",
+            f"- UP 主：{it.get('up', '')}",
+            f"- 链接：https://www.bilibili.com/video/{bv}",
+            f"- 推荐于 {date} · {slot}",
+            "",
+            "## 日报里的介绍", "",
+            _report_section(date, bv) or "（日报里没找到这一段）",
+            "",
+            "## 字幕（带时间点）", "",
+            "> B站 自动生成的字幕，术语、人名、数字可能识别错，记笔记时以视频为准。", "",
+            text if text else f"（没拿到字幕：{sub.get('message') or sub.get('error') or '原因不明'}）",
+            "",
+        ]
+        folder.mkdir(parents=True, exist_ok=True)
+        p = folder / f"{date} {_safe_name(slot, 8)} {_safe_name(title)} {bv}.md"
+        p.write_text("\n".join(body), encoding="utf-8")
+        saved.append(str(p))
+        await asyncio.sleep(0.5)
+    return saved
+
+
+@tool()
+async def report_index_write(items: list, date: str = "") -> str:
+    """
+    写今天这期日报的编号索引（私信里的 1、2、3 对应哪个 BV）。发私信之前必须先写，而且要在日报写完之后。
+    学习位（slot 里带"学习"）的视频，会顺便把字幕和日报里的介绍存到 notes/ 里，给主人对照记笔记。
 
     Args:
         items: [{"n": 1, "bvid": "BV...", "title": "...", "up": "...", "slot": "学习主菜"}, ...]
         date: 日期（留空 = 今天）
 
     Returns:
-        写到了哪个文件
+        写到了哪个文件；存了哪些字幕笔记
     """
     clean = []
     for it in items or []:
@@ -473,7 +544,11 @@ def report_index_write(items: list, date: str = "") -> str:
     p = HOME / "out" / (d + ".index.json")
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(_j({"date": d, "items": clean}), encoding="utf-8")
-    return _j({"ok": True, "path": str(p), "count": len(clean)})
+    try:
+        notes = await save_learning_notes(clean, d)
+    except Exception as e:  # noqa: BLE001  存笔记失败不影响索引
+        notes = [f"存字幕笔记失败：{type(e).__name__}"]
+    return _j({"ok": True, "path": str(p), "count": len(clean), "notes_saved": notes})
 
 
 @tool()

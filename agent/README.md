@@ -57,6 +57,8 @@ macOS / Linux：`bash agent/setup.sh 你的UID`，按最后打印的提示加 cr
   想在另一个窗口看定时任务的进度：`Get-Content -Encoding UTF8 -Wait "$env:USERPROFILE\.bili-agent\logs\$(Get-Date -Format yyyy-MM-dd)-daily.log"`
 - **给反馈**：直接回小号的私信，比如
   `2 好 讲得清楚` · `4 不想看 太浅` · `1 已看过`。理由最有用，照原话记进 `feedback.jsonl`。
+- **字幕笔记**：学习位推荐的视频，字幕和大纲会自动存到 `~/.bili-agent/notes/<年-月>/`。补存某一期：
+  `& "$env:USERPROFILE\.bili-agent\.venv\Scripts\python.exe" agent\save_notes.py 2026-10-27`
 - **应用复盘建议**：在仓库目录运行 `codex --add-dir ~/.bili-agent`，说"应用画像建议"。
 
 ## 数据都在哪（全在你电脑上，不进仓库）
@@ -70,6 +72,7 @@ macOS / Linux：`bash agent/setup.sh 你的UID`，按最后打印的提示加 cr
 | `shortlist/<日期>.json` | 初筛挑出的短名单 | 初筛写 |
 | `out/<日期>.md`、`out/<日期>.index.json` | 日报全文、私信编号索引 | 每轮写 |
 | `proposals/<日期>.md` | 每周的画像修改建议 | 每周写 |
+| `notes/<年-月>/…md` | 学习位视频的字幕（带时间点）＋日报里的大纲，给你对照记笔记 | 每轮自动存 |
 | `bili_credential.json` | 小号登录凭证（敏感） | 扫码时写 |
 
 ## 安全设计
