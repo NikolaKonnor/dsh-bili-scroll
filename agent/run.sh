@@ -11,7 +11,7 @@ case "$MODE" in
   weekly) PROMPT='使用 bili-weekly 技能，按"模式一：复盘"做本周复盘。' ;;
   *) echo "用法：run.sh daily|weekly"; exit 1 ;;
 esac
-codex exec -C "$REPO" -s read-only \
+codex exec -C "$REPO" -s read-only --skip-git-repo-check \
   -c 'approval_policy="never"' \
   -c 'mcp_servers.bili.startup_timeout_sec=60' \
   -c 'mcp_servers.bili.tool_timeout_sec=180' \

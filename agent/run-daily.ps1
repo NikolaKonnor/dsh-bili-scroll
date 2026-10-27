@@ -10,6 +10,7 @@ $Stamp = Get-Date -Format 'yyyy-MM-dd'
 codex exec `
   -C $Repo `
   -s read-only `
+  --skip-git-repo-check `
   -c 'approval_policy="never"' `
   -c 'mcp_servers.bili.startup_timeout_sec=60' `
   -c 'mcp_servers.bili.tool_timeout_sec=180' `
