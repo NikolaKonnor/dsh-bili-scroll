@@ -7,7 +7,7 @@ agent/inspect_videos.py —— 把几条视频的"体检数据"导出成一个�
   & "$env:USERPROFILE\\.bili-agent\\.venv\\Scripts\\python.exe" agent\\inspect_videos.py BV1xx BV1yy  # 指定 BV 号
 
 每条导出：
-  · 视频：标题、发布时间和距今天数、时长、原创/转载、分区、标签、简介、播放/点赞/投币/收藏/评论/弹幕/分享、互动率
+  · 视频：标题、发布时间和距今天数、时长、标签、简介、播放/点赞/投币/收藏/评论/弹幕/分享、互动率
   · UP 主：昵称、UID、粉丝数、签名、投稿总数、近 30 天投稿数、最近 15 条投稿（日期 / 播放 / 标题）、标题模板重复度
   · 字幕（带时间点，最长约 6000 字）和热评前 8 条
 结果写到 ~/.bili-agent/inspect/<时间>.md，最后打印路径 —— 把这个文件发出来就行。
@@ -75,7 +75,6 @@ async def inspect(bv: str, cred) -> str:
         f"- 链接：https://www.bilibili.com/video/{bv}",
         f"- 发布：{fmt_ts(info.get('pubdate'))}（距今 {days_ago(info.get('pubdate'))} 天）",
         f"- 时长：{int(info.get('duration') or 0) // 60} 分 {int(info.get('duration') or 0) % 60} 秒 · 分P：{len(info.get('pages') or [])}",
-        f"- 类型：{'原创' if info.get('copyright') == 1 else '转载'} · 分区：{info.get('tname', '')}",
         f"- 数据：播放 {view} · 点赞 {st.get('like', 0)} · 投币 {st.get('coin', 0)} · 收藏 {st.get('favorite', 0)}"
         f" · 评论 {st.get('reply', 0)} · 弹幕 {st.get('danmaku', 0)} · 分享 {st.get('share', 0)}",
         f"- 互动率：赞 {rate(int(st.get('like') or 0), view)} · 币 {rate(int(st.get('coin') or 0), view)}"

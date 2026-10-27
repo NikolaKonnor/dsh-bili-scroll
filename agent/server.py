@@ -204,7 +204,7 @@ async def bili_quality_check(bvid: str) -> str:
     """
     推荐前的质量体检（读字幕之前先做）。返回：发布时间和距今天数、播放与互动率、是否原创、
     UP 主粉丝数、投稿总数、近 30 天投稿数、最近投稿的标题是否套同一个模板，以及几个提醒标记。
-    标记只是提醒，最后由你结合字幕判断；但有 mass_upload 标记的，默认按"疑似批量生产号"处理。
+    标记只是提醒，最后由你结合字幕判断；但有 mass_upload 标记的，一律按"疑似批量生产号"跳过。
 
     Args:
         bvid: BV 号
@@ -227,7 +227,6 @@ async def bili_quality_check(bvid: str) -> str:
         "pubdate": dt.datetime.fromtimestamp(pub).strftime("%Y-%m-%d %H:%M") if pub else "",
         "days_since_pub": days,
         "duration_sec": info.get("duration"),
-        "copyright": "原创" if info.get("copyright") == 1 else "转载",
         "stat": {k: int(stat.get(k) or 0) for k in ("view", "like", "coin", "favorite", "reply", "danmaku", "share")},
         "rates": {
             "like_per_view": _ratio(int(stat.get("like") or 0), view),
@@ -263,8 +262,13 @@ async def bili_quality_check(bvid: str) -> str:
                 "recent_titles": [x.get("title", "")[:40] for x in vlist[:6]],
             })
             n30 = len(recent30)
-            if n30 >= 30 or (n30 >= 15 and top >= 5):
-                out["flags"].append("mass_upload：近 30 天投稿很密、标题套模板，疑似批量生产号")
+            med = plays[len(plays) // 2] if plays else 0
+            # 发得很勤、又长期没人看 —— 才算批量生产号；日更但有人看的（比如 AI 早报号）不算
+            if n30 >= 15 and med < 1000:
+                why = f"近 30 天投稿 {n30}{'+' if len(vlist) == 30 and n30 == 30 else ''} 条，最近 10 条播放中位数 {med}"
+                if top >= 5:
+                    why += f"，最近 15 条里 {top} 条套同一标题模板"
+                out["flags"].append("mass_upload：" + why + "，疑似批量生产号")
         except Exception as e:  # noqa: BLE001
             out["up"]["videos_error"] = str(e)[:80]
     if days is not None and days >= 3 and view < 1000:
