@@ -30,6 +30,10 @@ from pathlib import Path
 _HOME = Path(os.environ.get("BILI_DUTY_HOME") or (Path.home() / ".bili-agent")).expanduser()
 os.environ["BILI_DUTY_HOME"] = str(_HOME)
 os.environ.setdefault("BILI_CREDENTIAL_FILE", str(_HOME / "bili_credential.json"))
+# 白名单写成 "@tools.allow" 时，从本目录的 tools.allow 读 —— 以后改白名单不用重新 codex mcp add
+if os.environ.get("BILI_MCP_TOOLS", "").strip() == "@tools.allow":
+    _allow_file = Path(__file__).resolve().parent / "tools.allow"
+    os.environ["BILI_MCP_TOOLS"] = _allow_file.read_text(encoding="utf-8").strip() or "__none__"
 
 _VENDOR = Path(__file__).resolve().parent.parent / "vendor" / "bilibili-mcp"
 sys.path.insert(0, str(_VENDOR))
@@ -175,6 +179,101 @@ def memory_proposal_write(text: str) -> str:
     p = HOME / "proposals" / (_today() + ".md")
     head = "" if p.exists() else f"# 画像修改建议 {_today()}\n\n"
     return "已写到 " + base._append(p, head + body + "\n")
+
+
+# =====================================================================
+# ①½ 质量体检：发布时间、互动、UP 主是不是批量生产号
+# =====================================================================
+
+def _ratio(a, b) -> float:
+    return round(a / b, 4) if b else 0.0
+
+
+def _suffix(title: str) -> str:
+    """标题模板：取最后一个分隔符后面那段（"XX怎样赚钱？…｜DIS商业模式分析" → "商业模式分析"去掉代号前缀）"""
+    t = str(title or "")
+    for sep in ("｜", "|", "丨", "——", "-"):
+        if sep in t:
+            tail = t.rsplit(sep, 1)[1].strip()
+            return "".join(ch for ch in tail if not ch.isascii() or not ch.isalnum()).strip() or tail
+    return ""
+
+
+@tool()
+async def bili_quality_check(bvid: str) -> str:
+    """
+    推荐前的质量体检（读字幕之前先做）。返回：发布时间和距今天数、播放与互动率、是否原创、
+    UP 主粉丝数、投稿总数、近 30 天投稿数、最近投稿的标题是否套同一个模板，以及几个提醒标记。
+    标记只是提醒，最后由你结合字幕判断；但有 mass_upload 标记的，默认按"疑似批量生产号"处理。
+
+    Args:
+        bvid: BV 号
+
+    Returns:
+        JSON 体检结果
+    """
+    cred = base.get_cred()
+    v = base.video.Video(bvid=bvid, credential=cred)
+    info = await v.get_info()
+    stat = info.get("stat", {}) or {}
+    owner = info.get("owner", {}) or {}
+    pub = int(info.get("pubdate") or 0)
+    now = dt.datetime.now()
+    days = round((now - dt.datetime.fromtimestamp(pub)).total_seconds() / 86400, 1) if pub else None
+    view = int(stat.get("view") or 0)
+    out = {
+        "bvid": bvid,
+        "title": info.get("title", ""),
+        "pubdate": dt.datetime.fromtimestamp(pub).strftime("%Y-%m-%d %H:%M") if pub else "",
+        "days_since_pub": days,
+        "duration_sec": info.get("duration"),
+        "copyright": "原创" if info.get("copyright") == 1 else "转载",
+        "stat": {k: int(stat.get(k) or 0) for k in ("view", "like", "coin", "favorite", "reply", "danmaku", "share")},
+        "rates": {
+            "like_per_view": _ratio(int(stat.get("like") or 0), view),
+            "coin_per_view": _ratio(int(stat.get("coin") or 0), view),
+            "fav_per_view": _ratio(int(stat.get("favorite") or 0), view),
+        },
+        "up": {"name": owner.get("name", ""), "mid": owner.get("mid")},
+        "flags": [],
+    }
+    mid = owner.get("mid")
+    if mid:
+        u = base.user.User(uid=int(mid), credential=cred)
+        try:
+            rel = await u.get_relation_info()
+            out["up"]["fans"] = int(rel.get("follower") or 0)
+        except Exception as e:  # noqa: BLE001
+            out["up"]["fans_error"] = str(e)[:80]
+        try:
+            res = await u.get_videos(pn=1, ps=30, order=base.user.VideoOrder.PUBDATE)
+            vlist = (res.get("list") or {}).get("vlist") or []
+            total = int((res.get("page") or {}).get("count") or 0)
+            cutoff = (now - dt.timedelta(days=30)).timestamp()
+            recent30 = [x for x in vlist if int(x.get("created") or 0) >= cutoff]
+            plays = sorted(int(x.get("play") or 0) for x in vlist[:10] if isinstance(x.get("play"), (int, float)))
+            suffixes = [s for s in (_suffix(x.get("title")) for x in vlist[:15]) if s]
+            top = max((suffixes.count(s) for s in set(suffixes)), default=0)
+            out["up"].update({
+                "total_videos": total,
+                "uploads_last_30d": len(recent30),
+                "uploads_last_30d_capped": len(vlist) == 30 and len(recent30) == 30,  # true = 实际可能更多
+                "median_play_recent10": plays[len(plays) // 2] if plays else None,
+                "same_title_template_in_recent15": top,
+                "recent_titles": [x.get("title", "")[:40] for x in vlist[:6]],
+            })
+            n30 = len(recent30)
+            if n30 >= 30 or (n30 >= 15 and top >= 5):
+                out["flags"].append("mass_upload：近 30 天投稿很密、标题套模板，疑似批量生产号")
+        except Exception as e:  # noqa: BLE001
+            out["up"]["videos_error"] = str(e)[:80]
+    if days is not None and days >= 3 and view < 1000:
+        out["flags"].append(f"low_reach：发布 {days} 天，播放只有 {view}")
+    if out["up"].get("fans") is not None and out["up"]["fans"] < 1000:
+        out["flags"].append(f"small_channel：UP 主粉丝 {out['up']['fans']}")
+    if view >= 1000 and out["rates"]["like_per_view"] < 0.01:
+        out["flags"].append("weak_engagement：点赞/播放 低于 1%")
+    return _j(out)
 
 
 # =====================================================================

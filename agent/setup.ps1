@@ -48,12 +48,11 @@ if (-not (Test-Path $ProfileFile)) {
 }
 
 Write-Host '== 3/4 注册到 Codex（MCP 服务器名：bili）' -ForegroundColor Cyan
-$Allow = (Get-Content (Join-Path $Repo 'agent\tools.allow') -Raw).Trim()
 try { codex mcp remove bili *> $null } catch { }  # 第一次装时它不存在，报错无所谓
 codex mcp add bili `
   --env "BILI_DUTY_HOME=$DataDir" `
   --env "BILI_OWNER_UID=$OwnerUid" `
-  --env "BILI_MCP_TOOLS=$Allow" `
+  --env "BILI_MCP_TOOLS=@tools.allow" `
   -- $Py (Join-Path $Repo 'agent\server.py')
 
 Write-Host '== 4/4 扫码登录（用 agent 的小号扫）' -ForegroundColor Cyan
