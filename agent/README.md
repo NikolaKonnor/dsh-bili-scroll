@@ -79,7 +79,7 @@ agent/run-daily.ps1 / run-weekly.ps1 / run.sh   无人值守地跑一轮
 
 ## 已知问题
 
-- 第一次真机运行前，`codex exec` 和 MCP 的配合还没有在真实账号上实测过。如果日志里出现 MCP 工具调用被拒绝或等待审批，请把日志发出来。
+- 运行脚本里用 `mcp_servers.bili.default_tools_approval_mode="approve"` 让 bili 的工具免审批（无人值守时没人点同意）。如果日志里仍出现 `MCP tool call requires approval`，请把日志发出来。
 - 私信 500 字的上限是原项目实测得出的，B站 随时可能调整。
 
 ## 致谢

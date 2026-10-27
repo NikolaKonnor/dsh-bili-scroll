@@ -13,6 +13,7 @@ case "$MODE" in
 esac
 codex exec -C "$REPO" -s read-only --skip-git-repo-check \
   -c 'approval_policy="never"' \
+  -c 'mcp_servers.bili.default_tools_approval_mode="approve"' \
   -c 'mcp_servers.bili.startup_timeout_sec=60' \
   -c 'mcp_servers.bili.tool_timeout_sec=180' \
   -o "$DATA/logs/$STAMP-$MODE-final.txt" \

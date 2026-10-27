@@ -4,12 +4,16 @@ $Repo = Split-Path -Parent $PSScriptRoot
 $Logs = Join-Path $DataDir 'logs'
 New-Item -ItemType Directory -Force $Logs | Out-Null
 $Stamp = Get-Date -Format 'yyyy-MM-dd'
+# Codex 输出的是 UTF-8；Windows PowerShell 默认按 GBK 解码，日志会乱码
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 codex exec `
   -C $Repo `
   -s read-only `
   --skip-git-repo-check `
   -c 'approval_policy="never"' `
+  -c 'mcp_servers.bili.default_tools_approval_mode="approve"' `
   -c 'mcp_servers.bili.startup_timeout_sec=60' `
   -c 'mcp_servers.bili.tool_timeout_sec=180' `
   -o (Join-Path $Logs "$Stamp-weekly-final.txt") `
