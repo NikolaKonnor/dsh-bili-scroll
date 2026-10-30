@@ -966,16 +966,19 @@ async def candidate_pool(slot: str, keywords: list, days: int = 14, pages: int =
         vs = groups.get(band) or []
         if not vs:
             continue
-        vs.sort(key=lambda v: (v["fav"] / v["play"]) if v["play"] > 0 and v["fav"] >= 0 else -1, reverse=True)
+        # 播放太少时收藏率没有意义（1 播放 1 收藏 = 100%），显示成 "?"、排在这一档后面
+        vs.sort(key=lambda v: (v["fav"] / v["play"]) if v["play"] >= _RATE_MIN_PLAY and v["fav"] >= 0 else -1,
+                reverse=True)
         rows = []
         for v in vs:
-            fr = f"{v['fav'] / v['play']:.1%}" if v["play"] > 0 and v["fav"] >= 0 else "?"
+            fr = f"{v['fav'] / v['play']:.1%}" if v["play"] >= _RATE_MIN_PLAY and v["fav"] >= 0 else "?"
             age = f"{v['age']:.0f}天" if v["age"] is not None and v["age"] >= 1 else "今天"
             rows.append(f"{v['bvid']} | {v['title'][:50]} | {v['up'][:16]} | {_dur_txt(v['dur'])} | {age} | "
                         f"播放{_wan(v['play'])} | 藏{fr} | {v['source'][:40]}")
         bands.append((band, rows))
 
-    # Codex 默认只保留每次工具输出的约 1 万 token（约 40KB），超出会从中间截掉 —— 所以分页。
+    # Codex 会把一段脚本里的输出合在一起，合计超过约 1 万 token（约 40KB）就从中间截掉 —— 所以分页，而且页要小：
+    # 模型常把两三页拼在一起看，每页约 3000 token，拼三页也不会被截。
     # 每页都包含每一档的一段（按收藏率从高到低轮下去），只看第 1 页也能看到每档最好的那些。
     total_bytes = sum(len(r.encode("utf-8")) + 1 for _, rows in bands for r in rows)
     n_pages = max(1, -(-total_bytes // _PAGE_BYTES))
@@ -1004,7 +1007,8 @@ async def candidate_pool(slot: str, keywords: list, days: int = 14, pages: int =
     return head + pages_out[0]
 
 
-_PAGE_BYTES = 24000            # 一页约 6000 token，远低于 Codex 的截断线
+_PAGE_BYTES = 12000            # 一页约 3000 token；Codex 截断线约 1 万 token
+_RATE_MIN_PLAY = 1000          # 播放不到这个数，不算收藏率
 _pools: dict = {}
 _pool_seq = 0
 
