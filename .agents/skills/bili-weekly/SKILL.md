@@ -14,6 +14,7 @@ description: 每周复盘主人对 B站 日报的反馈，提出画像（profile
 1. `memory_profile_read`：读当前画像。
 2. `memory_feedback_recent(days=14)`：读最近两周的反馈。
 3. `duty_seen_recent(limit=200)`：看最近推过、跳过了什么。
+   `memory_requests_recent(days=14)`：主人最近主动点播过什么。反复点播的方向，可以提议写进画像第四节（比如加一个学习方向，或调整星期轮换）。
 4. 找规律，只看**有证据**的：
    - 同一类内容（方向、形式、UP 主、时长）连续被说"好"或"不好"；
    - 主人的理由里反复出现的词（"太浅""讲得清楚""太长""已经知道了"……）；

@@ -59,6 +59,8 @@ macOS / Linux：`bash agent/setup.sh 你的UID`，按最后打印的提示加 cr
   `2 好 讲得清楚` · `4 不想看 太浅` · `1 已看过`。理由最有用，照原话记进 `feedback.jsonl`。
 - **字幕笔记**：学习位推荐的视频，字幕和大纲会自动存到 `~/.bili-agent/notes/<年-月>/`。补存某一期：
   `& "$env:USERPROFILE\.bili-agent\.venv\Scripts\python.exe" agent\save_notes.py 2026-10-27`
+- **点播**：想让它某天专门找某类视频，直接私信小号，比如"今天请重点找怎么用 agent 找科研 idea，最好是资产定价方向，找不到不要硬凑"。
+  下一轮初筛会专门为它拉一池候选，日报里单独给一个"点播"位、排在最前；它会记进 `requests.jsonl`，周日复盘时一起看。
 - **应用复盘建议**：在仓库目录运行 `codex --add-dir ~/.bili-agent`，说"应用画像建议"。
 
 ## 数据都在哪（全在你电脑上，不进仓库）
@@ -72,6 +74,7 @@ macOS / Linux：`bash agent/setup.sh 你的UID`，按最后打印的提示加 cr
 | `shortlist/<日期>.json` | 初筛挑出的短名单 | 初筛写 |
 | `out/<日期>.md`、`out/<日期>.index.json` | 日报全文、私信编号索引 | 每轮写 |
 | `proposals/<日期>.md` | 每周的画像修改建议 | 每周写 |
+| `requests.jsonl` | 你的点播（私信里说想看什么） | 只追加 |
 | `notes/<年-月>/…md` | 学习位视频的字幕（带时间点）＋日报里的大纲，给你对照记笔记 | 每轮自动存 |
 | `bili_credential.json` | 小号登录凭证（敏感） | 扫码时写 |
 

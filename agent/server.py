@@ -168,6 +168,66 @@ def memory_feedback_recent(days: int = 30, limit: int = 200) -> str:
     return _j(rows[-max(1, min(int(limit or 200), 1000)):])
 
 
+REQUESTS = HOME / "requests.jsonl"
+
+
+@tool()
+def memory_request_append(text: str, msg_key: str = "", handled: str = "", date: str = "") -> str:
+    """
+    记一条主人的"点播"：他私信说想看什么（"今天重点找……"），不是对某条推荐的评价。
+    精选阶段处理完点播后记一笔（只追加）；每周复盘会看这些，了解主人最近主动想看什么。
+
+    Args:
+        text: 主人的原话（照抄，别改写）
+        msg_key: 私信的 key（去重用）
+        handled: 这一轮怎么处理的，一句话（比如"找到 2 条，放在点播位 1、2 号""没找到合适的"）
+        date: 日期（留空 = 今天）
+
+    Returns:
+        记下了 / 重复跳过
+    """
+    body = str(text or "").strip()
+    if not body:
+        return _j({"ok": False, "error": "text 不能为空"})
+    key = str(msg_key or "").strip()
+    if key and REQUESTS.exists():
+        for line in REQUESTS.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                if json.loads(line).get("msg_key") == key:
+                    return _j({"ok": True, "skipped": "这条点播已经记过了"})
+            except ValueError:
+                continue
+    row = {"date": _norm_date(date), "text": body[:500], "handled": str(handled or "").strip()[:200],
+           "msg_key": key[:40]}
+    base._append(REQUESTS, _j(row) + "\n")
+    return _j({"ok": True, "saved": row})
+
+
+@tool()
+def memory_requests_recent(days: int = 30) -> str:
+    """
+    读主人最近的点播（只读）。
+
+    Args:
+        days: 最近多少天（默认 30）
+
+    Returns:
+        JSON 列表，新的在后
+    """
+    if not REQUESTS.exists():
+        return "[]"
+    cutoff = (dt.date.today() - dt.timedelta(days=max(1, int(days or 30)))).isoformat()
+    rows = []
+    for line in REQUESTS.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if str(r.get("date", "")) >= cutoff:
+            rows.append(r)
+    return _j(rows[-200:])
+
+
 @tool()
 def memory_proposal_write(text: str) -> str:
     """
@@ -814,7 +874,7 @@ async def candidate_pool(slot: str, keywords: list, days: int = 14, pages: int =
     发布满 3 天但播放不到下限的、重复的。剩下的**全部**按播放分成 小众 / 腰部 / 爆款 三档列出来，由你来挑。
 
     Args:
-        slot: 这批候选给哪个位置找（学习 / AI新闻 / 下饭 / 有所感 / 放松）；决定默认播放下限
+        slot: 这批候选给哪个位置找（学习 / AI新闻 / 下饭 / 有所感 / 放松 / 点播）；决定默认播放下限
         keywords: 关键词列表（最多 8 个；不同角度，别只是同义词）
         days: 只要最近多少天发布的；0 = 只要今天；-1 = 不限
         pages: 每个关键词翻几页（1–5，每页约 40 条）
@@ -822,7 +882,7 @@ async def candidate_pool(slot: str, keywords: list, days: int = 14, pages: int =
         watch_days: 关注名单看最近几天；不填 = 跟 days 一样（days=-1 时取每人最近 10 条）
         rank: 同时拉哪些分区的三日榜，如 ["knowledge", "technology"]；不填 = 不拉
         weekly: 是否同时拉最新一期「每周必看」
-        min_play: 播放下限（只管发布满 3 天的）；-1 = 按位置：学习 / AI新闻 2000，其余 5000
+        min_play: 播放下限（只管发布满 3 天的）；-1 = 按位置：下饭 / 有所感 / 放松 5000，其余（学习 / AI新闻 / 点播）2000
 
     Returns:
         按三档分组的候选行（BV | 标题 | UP | 时长 | 发布几天 | 播放 | 收藏率 | 从哪来），以及各类被排除的数量
@@ -832,7 +892,7 @@ async def candidate_pool(slot: str, keywords: list, days: int = 14, pages: int =
     pages = max(1, min(int(pages or 3), 5))
     d = int(days if days is not None else 14)
     floor = int(min_play) if min_play is not None and int(min_play) >= 0 else (
-        2000 if ("学习" in slot or "AI" in slot.upper()) else 5000)
+        5000 if any(s in slot for s in ("下饭", "有所感", "放松")) else 2000)
     now = dt.datetime.now()
     start_today = dt.datetime.combine(dt.date.today(), dt.time())
     cutoff = None if d < 0 else (start_today if d == 0 else now - dt.timedelta(days=d))
@@ -1042,7 +1102,7 @@ def shortlist_write(items: list) -> str:
 
     Args:
         items: [{"bvid": "BV…", "slot": "学习", "why": "一句话为什么留它（30 字内）"}, …]
-               slot 用：学习 / AI新闻 / 下饭 / 有所感 / 放松；标题、UP、播放等由候选池自动补上
+               slot 用：学习 / AI新闻 / 下饭 / 有所感 / 放松 / 点播；标题、UP、播放等由候选池自动补上
 
     Returns:
         写到了哪个文件、现在各位置各有多少条
